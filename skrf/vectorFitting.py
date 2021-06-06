@@ -111,6 +111,22 @@ class VectorFitting:
         self.d_res_history = []
         self.delta_max_history = []
 
+        # matrices for the state-space form of the rational model
+        self.statespace_A = None
+        """ Matrix A holding the poles for the state-space representation of the fitted model. """
+
+        self.statespace_B = None
+        """ Matrix B holding some coefficients for the state-space representation of the fitted model. """
+
+        self.statespace_C = None
+        """ Matrix C holding the residues (zeros) for the state-space representation of the fitted model. """
+
+        self.statespace_D = None
+        """ Matrix D holding the constants for the state-space representation of the fitted model. """
+
+        self.statespace_E = None
+        """ Matrix E holding the proportional coefficients for the state-space representation of the fitted model. """
+
     def vector_fit(self, n_poles_real=2, n_poles_cmplx=2, init_pole_spacing='lin', parameter_type='S',
                    fit_constant=True, fit_proportional=False):
         """
@@ -155,6 +171,17 @@ class VectorFitting:
         poles will not only increase the computation workload during the fitting and the subsequent use of the model,
         but they can also introduce unwanted resonances at frequencies well outside the fit interval.
         """
+
+        # reset previous results
+        self.poles = None
+        self.zeros = None
+        self.constant_coeff = None
+        self.proportional_coeff = None
+        self.statespace_A = None
+        self.statespace_B = None
+        self.statespace_C = None
+        self.statespace_D = None
+        self.statespace_E = None
 
         # create initial poles and space them across the frequencies in the provided Touchstone file
         # use normalized frequencies during the iterations (seems to be more stable during least-squares fit)
@@ -495,7 +522,18 @@ class VectorFitting:
 
         logging.info('\n### Vector fitting finished.\n')
 
-    def passivity_test(self, parameter_type='S'):
+    def create_statespace_matrices(self):
+        """
+        Casts the previously fitted pole-residue model parameters into a state-space form with the real-valued state
+        matrices :attr:`statespace_A`, :attr:`statespace_B`, :attr:`statespace_C`, :attr:`statespace_D`, and
+        :attr:`statespace_E`. This method does not usually need to be called by the user. It is mainly intended as a
+        subroutine required for passivity evaluation and enforcement.
+
+        Returns
+        -------
+        None
+        """
+
         if self.poles is None:
             logging.error('self.poles = None; nothing to do. You need to run vector_fit() first.')
             return
@@ -508,16 +546,6 @@ class VectorFitting:
         if self.constant_coeff is None:
             logging.error('self.constant_coeff = None; nothing to do. You need to run vector_fit() first.')
             return
-
-        if parameter_type.lower() != 's':
-            logging.error('Passivity testing is only supported for scattering (S) parameters.')
-            return
-        if len(np.flatnonzero(self.proportional_coeff)) > 0:
-            logging.error('Passivity testing with nonzero proportional coefficients is not supported; '
-                          'you need to run vector_fit() with option \'fit_proportional=False\' first.')
-            return
-
-        # assemble real-valued state-space matrices A, B, C, D from fitted complex-valued pole-residue model
 
         # determine size of the matrix system
         n_poles_real = 0
@@ -534,28 +562,28 @@ class VectorFitting:
         # assemble A = [[poles_real,   0,                  0],
         #               [0,            real(poles_cplx),   imag(poles_cplx],
         #               [0,            -imag(poles_cplx),  real(poles_cplx]]
-        A = np.identity(n_matrix)
-        B = np.zeros(shape=(n_matrix, self.network.nports))
-        i_A = 0     # index on diagonal of A
+        self.statespace_A = np.identity(n_matrix)
+        self.statespace_B = np.zeros(shape=(n_matrix, self.network.nports))
+        i_A = 0  # index on diagonal of A
         for j in range(self.network.nports):
             for pole in self.poles:
                 if np.imag(pole) == 0.0:
                     # adding a real pole
-                    A[i_A, i_A] = np.real(pole)
-                    B[i_A, j] = 1
+                    self.statespace_A[i_A, i_A] = np.real(pole)
+                    self.statespace_B[i_A, j] = 1
                     i_A += 1
                 else:
                     # adding a complex-conjugate pole
-                    A[i_A, i_A] = np.real(pole)
-                    A[i_A, i_A + 1] = np.imag(pole)
-                    A[i_A + 1, i_A] = -1 * np.imag(pole)
-                    A[i_A + 1, i_A + 1] = np.real(pole)
-                    B[i_A, j] = 2
+                    self.statespace_A[i_A, i_A] = np.real(pole)
+                    self.statespace_A[i_A, i_A + 1] = np.imag(pole)
+                    self.statespace_A[i_A + 1, i_A] = -1 * np.imag(pole)
+                    self.statespace_A[i_A + 1, i_A + 1] = np.real(pole)
+                    self.statespace_B[i_A, j] = 2
                     i_A += 2
 
         # state-space matrix C holds the residues (zeros)
         # assemble C = [[R1.11, R1.12, R1.13, ...], [R2.11, R2.12, R2.13, ...], ...]
-        C = np.zeros(shape=(self.network.nports, n_matrix))
+        self.statespace_C = np.zeros(shape=(self.network.nports, n_matrix))
         for i in range(self.network.nports):
             for j in range(self.network.nports):
                 # i: row index
@@ -565,29 +593,68 @@ class VectorFitting:
                 j_zeros = 0
                 for zero in self.zeros[i_response]:
                     if np.imag(zero) == 0.0:
-                        C[i, j * (n_poles_real + 2 * n_poles_cplx) + j_zeros] = np.real(zero)
+                        self.statespace_C[i, j * (n_poles_real + 2 * n_poles_cplx) + j_zeros] = np.real(zero)
                         j_zeros += 1
                     else:
-                        C[i, j * (n_poles_real + 2 * n_poles_cplx) + j_zeros] = np.real(zero)
-                        C[i, j * (n_poles_real + 2 * n_poles_cplx) + j_zeros + 1] = np.imag(zero)
+                        self.statespace_C[i, j * (n_poles_real + 2 * n_poles_cplx) + j_zeros] = np.real(zero)
+                        self.statespace_C[i, j * (n_poles_real + 2 * n_poles_cplx) + j_zeros + 1] = np.imag(zero)
                         j_zeros += 2
 
         # state-space matrix D holds the constants
         # assemble D = [[d11, d12, ...], [d21, d22, ...], ...]
-        D = np.zeros(shape=(self.network.nports, self.network.nports))
+        self.statespace_D = np.zeros(shape=(self.network.nports, self.network.nports))
         for i in range(self.network.nports):
             for j in range(self.network.nports):
                 # i: row index
                 # j: column index
                 i_response = i * self.network.nports + j
-                D[i, j] = self.constant_coeff[i_response]
+                self.statespace_D[i, j] = self.constant_coeff[i_response]
+
+        # state-space matrix E holds the proportional coefficients (usually 0 in case of fitted S-parameters)
+        # assemble E = [[e11, e12, ...], [e21, e22, ...], ...]
+        self.statespace_E = np.zeros(shape=(self.network.nports, self.network.nports))
+        for i in range(self.network.nports):
+            for j in range(self.network.nports):
+                # i: row index
+                # j: column index
+                i_response = i * self.network.nports + j
+                self.statespace_E[i, j] = self.proportional_coeff[i_response]
+
+    def get_singular_values(self, freqs):
+        if self.statespace_A is None or self.statespace_B is None or self.statespace_C is None or self.statespace_D is None:
+                self.create_statespace_matrices()
+        if len(freqs) > 0:
+            sinvals = np.zeros(shape=(len(freqs), self.network.nports))
+            for i, freq in enumerate(freqs):
+                dim_A = np.shape(self.statespace_A)[0]
+                stsp_poles = np.linalg.inv(2j * np.pi * freq * np.identity(dim_A) - self.statespace_A)
+                stsp_S = np.matmul(np.matmul(self.statespace_C, stsp_poles), self.statespace_B)
+                stsp_S += self.statespace_D + 2j * np.pi * freq * self.statespace_E
+                u, sinvals[i], vh = np.linalg.svd(stsp_S)
+            return sinvals
+        else:
+            logging.error('Incorrect argument \'freqs\'.')
+            return None
+
+    def passivity_test(self, parameter_type='S'):
+
+        if self.statespace_A is None or self.statespace_B is None or self.statespace_C is None or self.statespace_D is None:
+                self.create_statespace_matrices()
+
+        if parameter_type.lower() != 's':
+            logging.error('Passivity testing is only supported for scattering (S) parameters.')
+            return
+        if len(np.flatnonzero(self.proportional_coeff)) > 0:
+            logging.error('Passivity testing with nonzero proportional coefficients is not supported; '
+                          'you need to run vector_fit() with option \'fit_proportional=False\' first.')
+            return
 
         # build test matrix P from state-space matrices A, B, C, D
-        inv_neg = np.linalg.inv(D - np.identity(self.network.nports))
-        inv_pos = np.linalg.inv(D + np.identity(self.network.nports))
-        prod_neg = np.matmul(np.matmul(B, inv_neg), C)
-        prod_pos = np.matmul(np.matmul(B, inv_pos), C)
-        P = np.matmul(A - prod_neg, A - prod_pos)
+        inv_neg = np.linalg.inv(self.statespace_D - np.identity(self.network.nports))
+        inv_pos = np.linalg.inv(self.statespace_D + np.identity(self.network.nports))
+        prod_neg = np.matmul(np.matmul(self.statespace_B, inv_neg), self.statespace_C)
+        prod_pos = np.matmul(np.matmul(self.statespace_B, inv_pos), self.statespace_C)
+        P = np.matmul(self.statespace_A - prod_neg, self.statespace_A - prod_pos)
 
         # extract eigenvalues of P
         P_eigs = np.linalg.eigvals(P)
